@@ -34,6 +34,7 @@
 # - Database integration for both followers and posts
 # - Real-time monitoring every 30 seconds
 # - UNLIMITED retry until valid data found
+# - All configuration values are now constants (no CLI/ENV needed)
 import asyncio
 from playwright.async_api import async_playwright
 import time
@@ -84,8 +85,48 @@ PLATFORM_ICONS = {
 # WIB Timezone
 WIB_TZ = pytz.timezone('Asia/Jakarta')
 
+# =============================================================================
+# CONFIGURATION CONSTANTS - MODIFY THESE VALUES AS NEEDED
+# =============================================================================
+# 
+# 🚀 QUICK CONFIGURATION GUIDE:
+# 
+# 1. CYCLE_SECONDS: How often to run monitoring (in seconds)
+#    - Default: 5 seconds (very fast for testing)
+#    - Recommended: 30 seconds for production
+#    - Maximum: 3600 seconds (1 hour)
+# 
+# 2. SHOW_BROWSER: Whether to show browser window
+#    - True: Show browser (good for debugging)
+#    - False: Headless mode (better for production)
+# 
+# 3. POST_OPEN_WAIT_MODE: How to wait after opening pages
+#    - 'auto': Wait until elements are ready (recommended)
+#    - 'fixed': Always wait fixed time
+# 
+# 4. POST_OPEN_WAIT_MS_*: Wait times in milliseconds
+#    - Instagram: 5000ms = 5 seconds
+#    - TikTok: 3000ms = 3 seconds
+# 
+# =============================================================================
+
 # Monitoring cycle interval (seconds)
-CYCLE_SECONDS = 30
+CYCLE_SECONDS = 5
+
+# Maximum allowed scraped value to avoid biased/extreme numbers
+MAX_SCRAPED_VALUE = 999_999_999_999
+
+# Show browser window on Windows by default
+SHOW_BROWSER = True
+
+# Post-open wait behavior configuration
+POST_OPEN_WAIT_MODE = 'auto'  # 'auto' or 'fixed'
+POST_OPEN_WAIT_MS_IG = 5000   # 5000ms = 5 seconds for Instagram
+POST_OPEN_WAIT_MS_TIKTOK = 3000  # 3000ms = 3 seconds for TikTok
+
+# =============================================================================
+# END CONFIGURATION CONSTANTS
+# =============================================================================
 
 # Show browser window on Windows by default
 SHOW_BROWSER = True
@@ -144,7 +185,11 @@ def clean_and_convert_to_int(value_str):
     if value_str is None or value_str == "N/A":
         return None
     try:
-        return int(re.sub(r'[^\d]', '', value_str))
+        numeric = int(re.sub(r'[^\d]', '', value_str))
+        # Enforce upper bound to avoid biased/extreme numbers
+        if numeric > MAX_SCRAPED_VALUE:
+            return None
+        return numeric
     except (ValueError, TypeError):
         return None
 
@@ -171,13 +216,13 @@ def now_wib_compact_str() -> str:
     return datetime.now(WIB_TZ).strftime('%d-%m-%Y | %H:%M:%S WIB')
 
 def get_next_run_time():
-    """Hitung waktu sampai siklus berikutnya (setiap 30 detik)."""
+    """Hitung waktu sampai siklus berikutnya (setiap CYCLE_SECONDS detik)."""
     now = datetime.now(WIB_TZ)
     target_time = now + timedelta(seconds=CYCLE_SECONDS)
     return target_time
 
 def get_time_until_next_run():
-    """Hitung berapa lama lagi sampai siklus berikutnya (30 detik)."""
+    """Hitung berapa lama lagi sampai siklus berikutnya (CYCLE_SECONDS detik)."""
     next_run = get_next_run_time()
     now = datetime.now(WIB_TZ)
     time_diff = next_run - now
@@ -189,7 +234,7 @@ def get_time_until_next_run():
     return hours, minutes, seconds
 
 def print_header():
-    """Print header yang modern dan menarik"""
+    """Print header yang modern dan menarik dengan info validation status"""
     now = datetime.now(WIB_TZ)
     next_run = get_next_run_time()
     hours, minutes, seconds = get_time_until_next_run()
@@ -204,13 +249,15 @@ def print_header():
     print(f"{BOLD}{CYAN}{'='*80}{RESET}")
     print(f"{BOLD}{MAGENTA}🤖 CREATOR WEB MONITORING BOT v2.0 🤖{RESET}")
     print(f"{BOLD}{CYAN}{'='*80}{RESET}")
-    print(f"{INFO} {BLUE}Instagram & TikTok Followers & Posts Monitor (Every 30 Seconds){RESET}")
+    print(f"{INFO} {BLUE}Instagram & TikTok Followers & Posts Monitor (Every {CYCLE_SECONDS} Seconds - Constant){RESET}")
     print(f"{CLOCK} {BLUE}Current Time (WIB): {now.strftime('%Y-%m-%d %H:%M:%S')}{RESET}")
     print(f"{SUN} {BLUE}Next Run: {next_run.strftime('%Y-%m-%d %H:%M:%S')} WIB{RESET}")
     print(f"{STAR} {BLUE}Time Until Next Run: {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}")
     print(f"{INFO} {BLUE}Today's Date: {now.strftime('%A, %d %B %Y')}{RESET}")
     print(f"{COMPUTER} {BLUE}System: {platform.system()} {platform.release()} | CPU: {cpu_percent:.0f}% | RAM: {ram_percent:.0f}%{RESET}")
-    print(f"{GLOBE} {BLUE}Cycle: every {CYCLE_SECONDS} seconds{RESET}")
+    print(f"{GLOBE} {BLUE}Cycle: every {CYCLE_SECONDS} seconds (constant){RESET}")
+    # Tampilkan konfigurasi post-open wait (konstanta)
+    print(f"{INFO} {BLUE}Post-open wait: mode={POST_OPEN_WAIT_MODE.upper()} | IG={POST_OPEN_WAIT_MS_IG}ms | TikTok={POST_OPEN_WAIT_MS_TIKTOK}ms (constants){RESET}")
     
     # Tampilkan informasi waktu yang tersisa dalam format yang mudah dibaca
     if hours >= 24:
@@ -221,18 +268,36 @@ def print_header():
         print(f"{CLOCK} {BLUE}Sleep Duration: {hours} hours, {minutes:02d} minutes{RESET}")
     
     # Cek status monitoring hari ini (berdasarkan rentang timestamp WIB)
-    today_start_utc, today_end_utc = get_today_wib_range_utc()
-    today_stats = list(stats_collection.find({
-        'cycle_type': '30sec',
-        'timestamp': { '$gte': today_start_utc, '$lt': today_end_utc }
-    }))
-    if len(today_stats) == 0:
+    today_completed = get_today_monitoring_count()
+    if today_completed == 0:
         print(f"{INFO} {BLUE}Today's Status: No monitoring sessions yet{RESET}")
     else:
-        print(f"{CHECK_MARK} {BLUE}Today's Status: {len(today_stats)} monitoring session(s) completed{RESET}")
+        print(f"{CHECK_MARK} {BLUE}Today's Status: {today_completed} monitoring session(s) completed{RESET}")
+    
+    # Tambahkan info validation status
+    try:
+        invalid_count = len(list(users_collection.find({
+            '$or': [
+                {'instagram_validation_status': 'salah'},
+                {'tiktok_verification_status': 'salah'}
+            ]
+        })))
+        
+        total_users = users_collection.count_documents({})
+        valid_users = total_users - invalid_count
+        
+        if invalid_count > 0:
+            print(f"{WARNING} {YELLOW}Validation Issues: {invalid_count} users with invalid status (will be auto-handled){RESET}")
+            print(f"{INFO} {BLUE}Valid users: {valid_users}/{total_users} ({valid_users/total_users*100:.1f}%){RESET}")
+        else:
+            print(f"{CHECK_MARK} {GREEN}All users have valid status{RESET}")
+            print(f"{INFO} {BLUE}Total users: {total_users}{RESET}")
+            
+    except Exception:
+        print(f"{INFO} {BLUE}Validation status: Checking...{RESET}")
     
     print(f"{GLOBE} {BLUE}Database: MongoDB Cloud{RESET}")
-    print(f"{STAR} {BLUE}Features: Followers + Posts Monitoring{RESET}")
+    print(f"{STAR} {BLUE}Features: Followers + Posts Monitoring + Smart Validation{RESET}")
     print(f"{CYAN}{'='*80}{RESET}")
 
 def print_progress_bar(current, total, width=50):
@@ -266,8 +331,8 @@ def print_system_stats(chrome_ram, python_ram):
     print(f"  {CYAN}Chrome RAM: {chrome_ram} MB{RESET}")
     print(f"  {CYAN}Python RAM: {python_ram} MB{RESET}")
 
-def print_cycle_summary(success, fail, total, cycle_time):
-    """Print ringkasan siklus yang modern"""
+def print_cycle_summary(success, fail, total, cycle_time, stats_data=None):
+    """Print ringkasan siklus yang modern dengan info user yang di-handle otomatis"""
     success_rate = (success / total * 100) if total > 0 else 0
     
     print(f"\n{BOLD}{MAGENTA}{'='*80}{RESET}")
@@ -278,10 +343,27 @@ def print_cycle_summary(success, fail, total, cycle_time):
     print(f"{STAR} {BLUE}Success Rate: {success_rate:.1f}%{RESET}")
     print(f"{CLOCK} {BLUE}Cycle Time: {format_duration_hms(cycle_time)}{RESET}")
     print(f"{INFO} {BLUE}Data Collected: Followers + Posts{RESET}")
+    
+    # Tambahkan info user yang di-handle otomatis
+    if stats_data:
+        auto_handled = [s for s in stats_data if s.get('handled_automatically', False)]
+        scraped_users = [s for s in stats_data if not s.get('handled_automatically', False)]
+        
+        if auto_handled:
+            print(f"{WARNING} {YELLOW}Auto-handled users: {len(auto_handled)}{RESET}")
+            for user in auto_handled:
+                reason = user.get('reason', 'unknown')
+                platform = user.get('platform', 'unknown')
+                username = user.get('username', 'unknown')
+                print(f"  {CYAN}• {username} ({platform}): {reason}{RESET}")
+        
+        if scraped_users:
+            print(f"{CHECK_MARK} {GREEN}Successfully scraped: {len(scraped_users)}{RESET}")
+    
     print(f"{BOLD}{MAGENTA}{'='*80}{RESET}")
 
 def print_countdown():
-    """Print countdown yang modern sampai siklus berikutnya (30 detik)"""
+    """Print countdown yang modern sampai siklus berikutnya (CYCLE_SECONDS detik)"""
     target_time = get_next_run_time()
     
     while True:
@@ -289,7 +371,7 @@ def print_countdown():
         time_diff = target_time - now
         
         if time_diff.total_seconds() <= 0:
-            print(f"\n{SUN} {GREEN}Time to wake up! Starting 30-second monitoring...{RESET}")
+            print(f"\n{SUN} {GREEN}Time to wake up! Starting {CYCLE_SECONDS}-second monitoring...{RESET}")
             break
         
         hours = int(time_diff.total_seconds() // 3600)
@@ -297,12 +379,12 @@ def print_countdown():
         seconds = int(time_diff.total_seconds() % 60)
         
         # Clear line dan print countdown dengan format yang lebih baik
-        print(f"\r{MOON} {BLUE}Waiting until next 30s cycle - {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}", end='', flush=True)
+        print(f"\r{MOON} {BLUE}Waiting until next {CYCLE_SECONDS}s cycle - {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}", end='', flush=True)
         
         time.sleep(1)
 
 async def print_countdown_async():
-    """Print countdown yang modern sampai siklus berikutnya (30 detik) (async version)"""
+    """Print countdown yang modern sampai siklus berikutnya (CYCLE_SECONDS detik) (async version)"""
     target_time = get_next_run_time()
     
     while True:
@@ -310,7 +392,7 @@ async def print_countdown_async():
         time_diff = target_time - now
         
         if time_diff.total_seconds() <= 0:
-            print(f"\n{SUN} {GREEN}Time to wake up! Starting 30-second monitoring...{RESET}")
+            print(f"\n{SUN} {GREEN}Time to wake up! Starting {CYCLE_SECONDS}-second monitoring...{RESET}")
             break
         
         hours = int(time_diff.total_seconds() // 3600)
@@ -318,7 +400,7 @@ async def print_countdown_async():
         seconds = int(time_diff.total_seconds() % 60)
         
         # Clear line dan print countdown dengan format yang lebih baik
-        print(f"\r{MOON} {BLUE}Waiting until next 30s cycle - {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}", end='', flush=True)
+        print(f"\r{MOON} {BLUE}Waiting until next {CYCLE_SECONDS}s cycle - {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}", end='', flush=True)
         
         await asyncio.sleep(1)
 
@@ -749,6 +831,77 @@ async def get_tiktok_posts_value(page):
     except Exception as e:
         return "N/A"
 
+async def smart_post_open_wait(page, platform: str):
+    """Tunggu secara cerdas setelah tab terbuka sesuai konfigurasi.
+    - fixed: tidur sesuai ms per platform
+    - auto: menunggu hingga elemen kunci siap, maksimal ms per platform
+    """
+    mode = POST_OPEN_WAIT_MODE
+    max_ms = POST_OPEN_WAIT_MS_TIKTOK if platform == 'tiktok' else POST_OPEN_WAIT_MS_IG
+    # Beri default yang masuk akal jika 0 pada mode auto
+    if mode == 'auto' and max_ms <= 0:
+        max_ms = 1000 if platform == 'tiktok' else 300
+
+    if mode not in ('auto', 'fixed'):
+        mode = 'auto'
+
+    if mode == 'fixed':
+        if max_ms > 0:
+            print(f"{MOON} {BLUE}Settling page (fixed) {platform} for {max_ms}ms...{RESET}")
+            await asyncio.sleep(max_ms / 1000)
+        else:
+            print(f"{SUN} {GREEN}No post-open wait required (fixed=0ms).{RESET}")
+        return
+
+    # mode == 'auto'
+    print(f"{MOON} {BLUE}Settling page (auto) {platform} up to {max_ms}ms...{RESET}")
+    start = time.time()
+    deadline = start + (max_ms / 1000 if max_ms > 0 else 0)
+    check_interval = 0.1
+
+    async def ig_ready() -> bool:
+        try:
+            el = await page.query_selector("div[aria-label='Follower Count']")
+            if not el:
+                return False
+            texts = await page.query_selector_all("div[aria-label='Follower Count'] span.odometer-value, div[aria-label='Follower Count'] span.odometer-formatting-mark")
+            if not texts:
+                return False
+            vals = [await page.evaluate('(n)=>n.textContent', t) for t in texts]
+            digits = re.sub(r'\D', '', ''.join(vals) if vals else '')
+            return bool(digits)
+        except Exception:
+            return False
+
+    async def tt_ready() -> bool:
+        try:
+            od = await page.query_selector(".odometer-inside")
+            if not od:
+                return False
+            values = await od.query_selector_all('.odometer-value')
+            if not values:
+                return False
+            vals = [await page.evaluate('(n)=>n.textContent', t) for t in values]
+            digits = re.sub(r'\D', '', ''.join(vals) if vals else '')
+            return bool(digits)
+        except Exception:
+            return False
+
+    is_ready = False
+    while True:
+        if platform == 'instagram':
+            is_ready = await ig_ready()
+        else:
+            is_ready = await tt_ready()
+
+        if is_ready:
+            print(f"{CHECK_MARK} {GREEN}Page ready. Proceeding...{RESET}")
+            break
+        if max_ms > 0 and time.time() >= deadline:
+            print(f"{WARNING} {YELLOW}Reached auto wait limit ({max_ms}ms). Continuing...{RESET}")
+            break
+        await asyncio.sleep(check_interval)
+
 # Quick path: attempt to read TikTok posts once without sampling or waits
 async def try_get_tiktok_posts_quick(page):
     try:
@@ -848,6 +1001,382 @@ async def handle_tiktok_cookie_popup(page):
     except Exception:
         pass
 
+async def get_valid_users_for_monitoring():
+    """Ambil user yang valid untuk monitoring berdasarkan validation status"""
+    try:
+        # Query user dengan filter validation status yang benar
+        valid_users = list(users_collection.find({
+            '$or': [
+                # Instagram: status benar atau belum ada status
+                {
+                    '$or': [
+                        {'instagram_validation_status': 'benar'},
+                        {'instagram_validation_status': {'$exists': False}},
+                        {'instagram_validation_status': None}
+                    ],
+                    'socialLinks.instagram': {'$exists': True, '$ne': ''}
+                },
+                # TikTok: status benar atau belum ada status
+                {
+                    '$or': [
+                        {'tiktok_verification_status': 'benar'},
+                        {'tiktok_verification_status': {'$exists': False}},
+                        {'tiktok_verification_status': None}
+                    ],
+                    'socialLinks.tiktok': {'$exists': True, '$ne': ''}
+                }
+            ]
+        }, {
+            'socialLinks': 1, 
+            '_id': 1,
+            'instagram_validation_status': 1,
+            'tiktok_verification_status': 1,
+            'name': 1
+        }))
+        
+        print(f"{INFO} {BLUE}Found {len(valid_users)} users with valid status for monitoring{RESET}")
+        return valid_users
+        
+    except Exception as e:
+        print(f"{CROSS_MARK} {RED}Error querying valid users: {e}{RESET}")
+        return []
+
+async def get_invalid_users_for_auto_handle():
+    """Ambil user dengan status validasi salah untuk auto-handle"""
+    try:
+        invalid_users = list(users_collection.find({
+            '$or': [
+                {'instagram_validation_status': 'salah'},
+                {'tiktok_verification_status': 'salah'}
+            ]
+        }, {
+            '_id': 1,
+            'name': 1,
+            'instagram_validation_status': 1,
+            'tiktok_verification_status': 1,
+            'socialLinks': 1
+        }))
+        
+        if invalid_users:
+            print(f"{WARNING} {YELLOW}Found {len(invalid_users)} users with invalid status for auto-handling{RESET}")
+            for user in invalid_users:
+                print(f"  {CYAN}• {user.get('name', 'Unknown')}: IG={user.get('instagram_validation_status', 'N/A')}, TT={user.get('tiktok_verification_status', 'N/A')}{RESET}")
+        
+        return invalid_users
+        
+    except Exception as e:
+        print(f"{CROSS_MARK} {RED}Error querying invalid users: {e}{RESET}")
+        return []
+
+async def auto_handle_invalid_users():
+    """Otomatis handle user dengan status validasi salah - return 0 dan update database"""
+    invalid_users = await get_invalid_users_for_auto_handle()
+    handled_count = 0
+    
+    for user in invalid_users:
+        try:
+            user_id = user['_id']
+            name = user.get('name', 'Unknown')
+            update_data = {}
+            
+            # Handle Instagram validation status salah
+            if user.get('instagram_validation_status') == 'salah':
+                update_data.update({
+                    'instagramFollowers': 0,
+                    'instagramPosts': 0,
+                    'instagram_validation_status': 'auto_reset',
+                    'updated_at': datetime.now(timezone.utc)
+                })
+                print(f"{WARNING} {YELLOW}Auto-handling Instagram for {name}: status=salah → followers=0, posts=0{RESET}")
+            
+            # Handle TikTok verification status salah
+            if user.get('tiktok_verification_status') == 'salah':
+                update_data.update({
+                    'tiktokFollowers': 0,
+                    'tiktokPosts': 0,
+                    'tiktok_verification_status': 'auto_reset',
+                    'updated_at': datetime.now(timezone.utc)
+                })
+                print(f"{WARNING} {YELLOW}Auto-handling TikTok for {name}: status=salah → followers=0, posts=0{RESET}")
+            
+            # Update database
+            if update_data:
+                users_collection.update_one(
+                    {'_id': user_id},
+                    {'$set': update_data}
+                )
+                handled_count += 1
+                print(f"{CHECK_MARK} {GREEN}Auto-handle completed for {name}{RESET}")
+                
+        except Exception as e:
+            print(f"{CROSS_MARK} {RED}Error during auto-handle for {name}: {e}{RESET}")
+    
+    if handled_count > 0:
+        print(f"{CHECK_MARK} {GREEN}Auto-handled {handled_count} users with invalid status{RESET}")
+    
+    return handled_count
+
+async def smart_user_monitoring(user_info, page, context):
+    """Monitoring user dengan smart validation dan error handling"""
+    
+    username = user_info['username']
+    platform = user_info['platform']
+    user_id = user_info['_id']
+    name = user_info.get('name', 'Unknown')
+    
+    print_smart_status(username, platform, 'START')
+    user_start = time.time()
+    
+    try:
+        # Cek status validasi sebelum scraping
+        user_doc = users_collection.find_one({'_id': user_id})
+        if not user_doc:
+            print(f"{CROSS_MARK} {RED}User document not found{RESET}")
+            return False, "USER_NOT_FOUND"
+        
+        # Smart validation check - return 0 jika status salah
+        if platform == 'instagram':
+            validation_status = user_doc.get('instagram_validation_status')
+            if validation_status == 'salah':
+                print(f"{WARNING} {YELLOW}Instagram validation status is 'salah' - auto-returning 0{RESET}")
+                
+                # Update database dengan nilai 0
+                users_collection.update_one(
+                    {'_id': user_id},
+                    {
+                        '$set': {
+                            'instagramFollowers': 0,
+                            'instagramPosts': 0,
+                            'instagram_validation_status': 'auto_reset',
+                            'updated_at': datetime.now(timezone.utc)
+                        }
+                    }
+                )
+                
+                print_smart_status(username, platform, 'SUCCESS', 0, 0, time.time() - user_start)
+                return True, "AUTO_HANDLED_IG_SALAH"
+        
+        elif platform == 'tiktok':
+            verification_status = user_doc.get('tiktok_verification_status')
+            if verification_status == 'salah':
+                print(f"{WARNING} {YELLOW}TikTok verification status is 'salah' - auto-returning 0{RESET}")
+                
+                # Update database dengan nilai 0
+                users_collection.update_one(
+                    {'_id': user_id},
+                    {
+                        '$set': {
+                            'tiktokFollowers': 0,
+                            'tiktokPosts': 0,
+                            'tiktok_verification_status': 'auto_reset',
+                            'updated_at': datetime.now(timezone.utc)
+                        }
+                    }
+                )
+                
+                print_smart_status(username, platform, 'SUCCESS', 0, 0, time.time() - user_start)
+                return True, "AUTO_HANDLED_TT_SALAH"
+        
+        # Jika status valid, lanjutkan dengan scraping normal
+        url = base_urls[platform].format(username=username)
+        print(f"{GLOBE} {BLUE}Opening browser tab for valid user...{RESET}")
+        print(f"{INFO} {CYAN}URL: {url}{RESET}")
+        
+        # Scraping logic untuk user yang valid
+        attempt = 0
+        max_delay = 300  # maksimal delay 5 menit
+        success = False
+        
+        while not success:
+            try:
+                print(f"{GLOBE} {BLUE}Opening browser tab...{RESET}")
+                print(f"{INFO} {CYAN}URL: {url}{RESET}")
+                page = await context.new_page()
+                
+                # In headless mode, block heavy resources; when showing browser, let all resources load
+                if not SHOW_BROWSER:
+                    await page.route("**/*", block_resource)
+                
+                # Optimized timeout values: 3s initial, max 15s for faster performance
+                timeout_values = [3000, 5000, 8000, 12000, 15000]  # 3s, 5s, 8s, 12s, 15s
+                timeout = timeout_values[min(attempt, len(timeout_values) - 1)]
+                
+                print(f"{CLOCK} {BLUE}Timeout: {timeout}ms{RESET}")
+                await page.goto(url, timeout=timeout, wait_until='domcontentloaded')
+                
+                # Reduced network idle timeout: 5s → 3s
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=3000)
+                except Exception:
+                    print(f"{WARNING} {YELLOW}Network idle timeout, continuing...{RESET}")
+                
+                # Quicker URL check: 25 → 15 iterations, 0.1s → 0.05s intervals
+                for _ in range(15):  # Reduced from 25
+                    if page.url == url or platform in page.url:
+                        break
+                    await asyncio.sleep(0.05)  # Reduced from 0.1s
+                
+                print(f"{CHECK_MARK} {GREEN}Browser tab opened successfully{RESET}")
+                if platform == 'tiktok':
+                    await handle_tiktok_cookie_popup(page)
+                
+                # Cerdas: tunggu setelah tab terbuka sesuai konfigurasi
+                await smart_post_open_wait(page, platform)
+                
+                # Loop until we get valid data (unlimited)
+                while True:
+                    sample_time_start = time.time()
+                    if platform == 'instagram':
+                        # Scrape followers first
+                        print(f"{INFO} {CYAN}Scraping Instagram followers...{RESET}")
+                        follower_count_str = await stable_sample_followers(get_instagram_followers_value, page)
+                        follower_count_int = clean_and_convert_to_int(follower_count_str)
+                        
+                        # Immediately scrape posts after successful followers
+                        if follower_count_int is not None and follower_count_int > 0:
+                            print(f"{INFO} {CYAN}Followers valid ({follower_count_int}), now scraping posts...{RESET}")
+                            post_count_str = "N/A"
+                            post_count_int = None
+                            try:
+                                # Fast path: attempt quick grab without sampling
+                                post_count_str = await try_get_instagram_posts_quick(page)
+                                if not post_count_str or post_count_str == "N/A":
+                                    # Fallback to stable sampling if quick path fails
+                                    post_count_str = await stable_sample_posts(get_instagram_posts_value, page)
+                                post_count_int = clean_and_convert_to_int(post_count_str)
+                                print(f"{CHECK_MARK} {GREEN}Posts scraped: {post_count_str}{RESET}")
+                            except Exception as e:
+                                print(f"{WARNING} {YELLOW}Failed to scrape Instagram posts: {e}{RESET}")
+                            
+                            sample_time = time.time() - sample_time_start
+                            print(f"[RESULT] Instagram followers: {follower_count_str} (int: {follower_count_int}), posts: {post_count_str} (int: {post_count_int}), waktu sampling: {sample_time:.2f} detik")
+                            
+                            # Update database with both followers and posts
+                            update_data = {'instagramFollowers': follower_count_int}
+                            if post_count_int is not None and post_count_int > 0:
+                                update_data['instagramPosts'] = post_count_int
+                            else:
+                                # Store N/A as null in database
+                                update_data['instagramPosts'] = None
+                            
+                            users_collection.update_one(
+                                { '_id': user_id },
+                                { '$set': update_data }
+                            )
+                            
+                            print_smart_status(username, platform, 'SUCCESS', follower_count_int, post_count_int, time.time() - user_start)
+                            success = True
+                            break
+                        else:
+                            print(f"{WARNING} {YELLOW}Invalid followers data: '{follower_count_str}' - Retrying...{RESET}")
+                            await asyncio.sleep(0.5)  # Reduced from 1s for faster retry
+                            continue
+                    elif platform == 'tiktok':
+                        # Scrape followers first
+                        print(f"{INFO} {CYAN}Scraping TikTok followers...{RESET}")
+                        followers = await stable_sample_followers(get_tiktok_followers_value, page)
+                        followers_int = clean_and_convert_to_int(followers)
+                        
+                        # Immediately scrape posts after successful followers
+                        if followers != "N/A" and followers_int is not None and followers_int > 0:
+                            print(f"{INFO} {CYAN}Followers valid ({followers_int}), now scraping posts...{RESET}")
+                            posts = "N/A"
+                            posts_int = None
+                            try:
+                                # Fast path: attempt quick grab without sampling
+                                posts = await try_get_tiktok_posts_quick(page)
+                                if not posts or posts == "N/A":
+                                    # Fallback to stable sampling if quick path fails
+                                    posts = await stable_sample_posts(get_tiktok_posts_value, page)
+                                posts_int = clean_and_convert_to_int(posts)
+                                print(f"{CHECK_MARK} {GREEN}Posts scraped: {posts}{RESET}")
+                            except Exception as e:
+                                print(f"{WARNING} {YELLOW}Failed to scrape TikTok posts: {e}{RESET}")
+                            
+                            sample_time = time.time() - sample_time_start
+                            print(f"[RESULT] TikTok followers: {followers} (int: {followers_int}), posts: {posts} (int: {posts_int}), waktu sampling: {sample_time:.2f} detik")
+                            
+                            # Update database with both followers and posts
+                            update_data = {'tiktokFollowers': followers_int}
+                            if posts_int is not None and posts_int > 0:
+                                update_data['tiktokPosts'] = posts_int
+                            else:
+                                # Store N/A as null in database
+                                update_data['tiktokPosts'] = None
+                            
+                            users_collection.update_one(
+                                { '_id': user_id },
+                                { '$set': update_data }
+                            )
+                            
+                            print_smart_status(username, platform, 'SUCCESS', followers_int, posts_int, time.time() - user_start)
+                            success = True
+                            break
+                        else:
+                            print(f"{WARNING} {YELLOW}Invalid followers data: '{followers}' - Retrying...{RESET}")
+                            await asyncio.sleep(0.5)  # Reduced from 1s for faster retry
+                            continue
+                
+                print(f"{YELLOW}[INFO] Closing tab...{RESET}")
+                await page.close()
+                print(f"{CHECK_MARK} {GREEN}Tab closed.{RESET}")
+                break
+                
+            except Exception as e:
+                # Cerdas: Pastikan page ditutup jika terjadi error
+                try:
+                    print(f"{YELLOW}[INFO] Closing tab after error...{RESET}")
+                    await page.close()
+                    print(f"{CHECK_MARK} {GREEN}Tab closed.{RESET}")
+                except Exception:
+                    pass
+                
+                attempt += 1
+                delay = min(2 ** attempt, max_delay)
+                
+                # Cerdas: Handle TimeoutError secara khusus
+                if 'TimeoutError' in str(type(e)):
+                    print(f"{WARNING} {YELLOW}Website timeout, attempt #{attempt}{RESET}")
+                    if attempt % 3 == 0:
+                        print(f"{INFO} {BLUE}Restarting browser context...{RESET}")
+                        try:
+                            print(f"{YELLOW}[INFO] Closing browser context for restart...{RESET}")
+                            await context.close()
+                            print(f"{CHECK_MARK} {GREEN}Browser context closed.{RESET}")
+                        except Exception:
+                            pass
+                        context = await browser.new_context(
+                            user_agent='Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
+                            viewport=None if SHOW_BROWSER else {'width': 100, 'height': 100}
+                        )
+                else:
+                    print(f"{CROSS_MARK} {RED}Exception: {type(e).__name__}: {e}{RESET}")
+                    traceback.print_exc()
+                
+                print(f"{CLOCK} {BLUE}Retrying in {delay}s...{RESET}")
+                
+                # Cerdas: Restart context setiap 5x gagal untuk semua error
+                if attempt % 5 == 0:
+                    print(f"{INFO} {BLUE}Restarting browser context for recovery...{RESET}")
+                    try:
+                        print(f"{YELLOW}[INFO] Closing browser context for recovery...{RESET}")
+                        await context.close()
+                        print(f"{CHECK_MARK} {GREEN}Browser context closed.{RESET}")
+                    except Exception:
+                        pass
+                    context = await browser.new_context(
+                        user_agent='Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
+                        viewport=None if SHOW_BROWSER else {'width': 100, 'height': 100}
+                    )
+                
+                await asyncio.sleep(delay)
+        
+        return True, "SCRAPING_SUCCESS"
+        
+    except Exception as e:
+        print(f"{CROSS_MARK} {RED}Error in smart monitoring: {e}{RESET}")
+        return False, str(e)
+
 async def main_loop():
     base_urls = {
         'instagram': "https://livecounts.nl/instagram-realtime/?u={username}",
@@ -855,12 +1384,12 @@ async def main_loop():
     }
     
     print(f"{SUN} {BOLD}{GREEN}Bot started successfully!{RESET}")
-    print(f"{INFO} {BLUE}Bot will run automatically every {CYCLE_SECONDS} seconds{RESET}")
+    print(f"{INFO} {BLUE}Bot will run automatically every {CYCLE_SECONDS} seconds (constant){RESET}")
     
     async with async_playwright() as p:
         try:
             while True:
-                # Cek apakah sudah waktunya untuk monitoring (setiap 30 detik)
+                # Cek apakah sudah waktunya untuk monitoring (setiap CYCLE_SECONDS detik)
                 now = datetime.now(WIB_TZ)
                 next_run = get_next_run_time()
                 
@@ -868,7 +1397,7 @@ async def main_loop():
                 if now < next_run:
                     clear_screen()
                     print_header()
-                    print(f"\n{MOON} {BOLD}{BLUE}Waiting until next 30-second cycle...{RESET}")
+                    print(f"\n{MOON} {BOLD}{BLUE}Waiting until next {CYCLE_SECONDS}-second cycle...{RESET}")
                     print(f"{INFO} {BLUE}Current time: {now.strftime('%H:%M:%S')} WIB{RESET}")
                     print(f"{SUN} {BLUE}Next monitoring at: {next_run.strftime('%H:%M:%S')} WIB{RESET}")
                     
@@ -879,30 +1408,36 @@ async def main_loop():
                 clear_screen()
                 print_header()
                 now = datetime.now(WIB_TZ)
-                print(f"\n{ROCKET} {BOLD}{CYAN}Starting 30-second monitoring cycle...{RESET}")
-                print(f"{CLOCK} {BLUE}30-second cycle started at: {now.strftime('%H:%M:%S')} WIB{RESET}")
+                print(f"\n{ROCKET} {BOLD}{CYAN}Starting {CYCLE_SECONDS}-second monitoring cycle...{RESET}")
+                print(f"{CLOCK} {BLUE}{CYCLE_SECONDS}-second cycle started at: {now.strftime('%H:%M:%S')} WIB{RESET}")
                 print(f"{INFO} {BLUE}Monitoring Date: {now.strftime('%A, %d %B %Y')}{RESET}")
                 
-                # Cek apakah ini monitoring pertama hari ini (berdasarkan rentang timestamp WIB)
-                today_start_utc, today_end_utc = get_today_wib_range_utc()
-                today_stats = list(stats_collection.find({
-                    'cycle_type': '30sec',
-                    'timestamp': { '$gte': today_start_utc, '$lt': today_end_utc }
-                }))
-                if len(today_stats) == 0:
+                # Cek sesi monitoring ke berapa sekarang berdasarkan monitoring_count terakhir
+                today_completed_count = get_today_monitoring_count()
+                if today_completed_count == 0:
                     print(f"{STAR} {BLUE}First monitoring session of the day{RESET}")
                 else:
-                    print(f"{INFO} {BLUE}Monitoring session #{len(today_stats) + 1} of the day{RESET}")
+                    print(f"{INFO} {BLUE}Monitoring session #{today_completed_count + 1} of the day{RESET}")
                 
                 siklus_start = time.time()
                 users_to_monitor = []
-                users_from_db = list(users_collection.find({}, {'socialLinks': 1, '_id': 1}))
+                users_from_db = list(users_collection.find({}, {'socialLinks': 1, '_id': 1, 'name': 1}))
                 for user in users_from_db:
                     social = user.get('socialLinks', {})
                     if 'instagram' in social and social['instagram']:
-                        users_to_monitor.append({'_id': user['_id'], 'username': social['instagram'], 'platform': 'instagram'})
+                        users_to_monitor.append({
+                            '_id': user['_id'], 
+                            'username': social['instagram'], 
+                            'platform': 'instagram',
+                            'name': user.get('name', 'Unknown')
+                        })
                     if 'tiktok' in social and social['tiktok']:
-                        users_to_monitor.append({'_id': user['_id'], 'username': social['tiktok'], 'platform': 'tiktok'})
+                        users_to_monitor.append({
+                            '_id': user['_id'], 
+                            'username': social['tiktok'], 
+                            'platform': 'tiktok',
+                            'name': user.get('name', 'Unknown')
+                        })
                 
                 total_success = 0
                 total_fail = 0
@@ -943,7 +1478,54 @@ async def main_loop():
                     print(f"\n{INFO} {BLUE}Found {len(users_to_monitor)} users to monitor{RESET}")
                     print(f"{CYAN}{'─'*80}{RESET}")
                     
-                    for i, user_info in enumerate(users_to_monitor, 1):
+                    # Auto-handle users with invalid status first
+                    print(f"{INFO} {BLUE}Checking for users with invalid validation status...{RESET}")
+                    auto_handled_count = await auto_handle_invalid_users()
+                    
+                    if auto_handled_count > 0:
+                        print(f"{CHECK_MARK} {GREEN}Auto-handled {auto_handled_count} users with invalid status{RESET}")
+                        # Add auto-handled users to stats
+                        for user in users_to_monitor:
+                            user_doc = users_collection.find_one({'_id': user['_id']})
+                            if user_doc:
+                                if user['platform'] == 'instagram' and user_doc.get('instagram_validation_status') == 'auto_reset':
+                                    stats_data.append({
+                                        'username': user['username'],
+                                        'platform': 'instagram',
+                                        'followers': 0,
+                                        'posts': 0,
+                                        'handled_automatically': True,
+                                        'reason': 'instagram_validation_salah'
+                                    })
+                                    total_success += 1
+                                elif user['platform'] == 'tiktok' and user_doc.get('tiktok_verification_status') == 'auto_reset':
+                                    stats_data.append({
+                                        'username': user['username'],
+                                        'platform': 'tiktok',
+                                        'followers': 0,
+                                        'posts': 0,
+                                        'handled_automatically': True,
+                                        'reason': 'tiktok_verification_salah'
+                                    })
+                                    total_success += 1
+                    
+                    # Filter out users that were auto-handled
+                    users_to_scrape = []
+                    for user in users_to_monitor:
+                        user_doc = users_collection.find_one({'_id': user['_id']})
+                        if user_doc:
+                            if user['platform'] == 'instagram' and user_doc.get('instagram_validation_status') == 'auto_reset':
+                                print(f"{INFO} {BLUE}Skipping Instagram user '{user['username']}' - already auto-handled{RESET}")
+                                continue
+                            elif user['platform'] == 'tiktok' and user_doc.get('tiktok_verification_status') == 'auto_reset':
+                                print(f"{INFO} {BLUE}Skipping TikTok user '{user['username']}' - already auto-handled{RESET}")
+                                continue
+                            else:
+                                users_to_scrape.append(user)
+                    
+                    print(f"{INFO} {BLUE}Proceeding with {len(users_to_scrape)} users for active scraping{RESET}")
+                    
+                    for i, user_info in enumerate(users_to_scrape, 1):
                         print_smart_status(user_info['username'], user_info['platform'], 'START')
                         user_start = time.time()
                         url = base_urls[user_info['platform']].format(username=user_info['username'])
@@ -987,8 +1569,9 @@ async def main_loop():
                                 
                                 print(f"{CHECK_MARK} {GREEN}Browser tab opened successfully{RESET}")
                                 if user_info['platform'] == 'tiktok':
-                                    await asyncio.sleep(1)  # Reduced from 2s
                                     await handle_tiktok_cookie_popup(page)
+                                # Cerdas: tunggu setelah tab terbuka sesuai konfigurasi
+                                await smart_post_open_wait(page, user_info['platform'])
                                 
                                 # Loop until we get valid data (unlimited)
                                 while True:
@@ -1035,7 +1618,9 @@ async def main_loop():
                                                 'username': user_info['username'],
                                                 'platform': 'instagram',
                                                 'followers': follower_count_int,
-                                                'posts': post_count_int if post_count_int else None
+                                                'posts': post_count_int if post_count_int else None,
+                                                'handled_automatically': False,
+                                                'reason': 'scraping_success'
                                             })
                                             
                                             user_time = time.time() - user_start
@@ -1092,7 +1677,9 @@ async def main_loop():
                                                 'username': user_info['username'],
                                                 'platform': 'tiktok',
                                                 'followers': followers_int,
-                                                'posts': posts_int if posts_int else None
+                                                'posts': posts_int if posts_int else None,
+                                                'handled_automatically': False,
+                                                'reason': 'scraping_success'
                                             })
                                             
                                             user_time = time.time() - user_start
@@ -1160,14 +1747,15 @@ async def main_loop():
                                 
                                 await asyncio.sleep(delay)
                         print(f"{CYAN}{'─'*80}{RESET}")
+                
                 except Exception as e:
                     print(f"{RED}[EXCEPTION] {type(e).__name__}: {e}{RESET}")
                     traceback.print_exc()
                     if 'TimeoutError' in str(type(e)) or 'NetworkError' in str(type(e)):
-                        print(f"{RED}{user_info['username'].ljust(20)} {user_info['platform'].ljust(12)} {'N/A'.rjust(15)}  RETRY{RESET}")
+                        print(f"{RED}Network/Timeout error - will retry in next cycle{RESET}")
                         await asyncio.sleep(2)
                         continue
-                    print(f"{RED}{user_info['username'].ljust(20)} {user_info['platform'].ljust(12)} {'N/A'.rjust(15)}  FATAL ERROR: {type(e).__name__}{RESET}")
+                    print(f"{RED}Fatal error occurred: {type(e).__name__}{RESET}")
                     total_fail += 1
                     break
                 finally:
@@ -1192,26 +1780,44 @@ async def main_loop():
                 print(f"{CYAN}{'─'*70}{RESET}")
                 
                 siklus_time = time.time() - siklus_start
-                print_cycle_summary(total_success, total_fail, len(users_to_monitor), siklus_time)
+                print_cycle_summary(total_success, total_fail, len(users_to_monitor), siklus_time, stats_data)
                 
-                # Hitung berapa kali monitoring sudah dilakukan hari ini (30 detik) berbasis timestamp WIB
+                # Hitung berapa kali monitoring sudah dilakukan hari ini (CYCLE_SECONDS detik) berbasis timestamp WIB
                 today_start_utc, today_end_utc = get_today_wib_range_utc()
                 today_stats = list(stats_collection.find({
-                    'cycle_type': '30sec',
+                    'cycle_type': f'{CYCLE_SECONDS}sec',
                     'timestamp': { '$gte': today_start_utc, '$lt': today_end_utc }
-                }))
-                monitoring_count = len(today_stats) + 1
+                }, { 'monitoring_count': 1 }))
+                # Ambil monitoring_count tertinggi hari ini lalu tambah 1
+                prev_count = 0
+                if today_stats:
+                    try:
+                        prev_count = max(int(doc.get('monitoring_count', 0) or 0) for doc in today_stats)
+                    except Exception:
+                        prev_count = len(today_stats)
+                monitoring_count = prev_count + 1
+
+                # Hapus semua dokumen stats hari ini agar hanya menyimpan data terbaru
+                try:
+                    delete_res = stats_collection.delete_many({
+                        'cycle_type': f'{CYCLE_SECONDS}sec',
+                        'timestamp': { '$gte': today_start_utc, '$lt': today_end_utc }
+                    })
+                    print(f"{INFO} {BLUE}Replaced {delete_res.deleted_count} previous stats document(s) for today{RESET}")
+                except Exception as e:
+                    print(f"{WARNING} {YELLOW}Failed to delete previous stats for today: {e}{RESET}")
                 
+                # Simpan dokumen stats terbaru untuk hari ini
                 stats_collection.insert_one({
                     'timestamp': datetime.now(timezone.utc),
                     'wib_datetime': now_wib_compact_str(),
-                    'cycle_type': '30sec',
+                    'cycle_type': f'{CYCLE_SECONDS}sec',
                     'monitoring_count': monitoring_count,
                     'scrape_duration': format_duration_hms(siklus_time),
                     'data': stats_data
                 })
-                print(f"{CHECK_MARK} {GREEN}Statistics sent to MongoDB (30-second monitoring #{monitoring_count}){RESET}")
-                print(f"{INFO} {BLUE}Total 30-second monitoring sessions today: {monitoring_count}{RESET}")
+                print(f"{CHECK_MARK} {GREEN}Statistics upserted for today ({CYCLE_SECONDS}-second monitoring #{monitoring_count}){RESET}")
+                print(f"{INFO} {BLUE}Total {CYCLE_SECONDS}-second monitoring sessions today: {monitoring_count}{RESET}")
                 print(f"{CYAN}{'─'*70}{RESET}")
                 print(f"{COMPUTER} {BLUE}Active Chrome processes:{RESET}")
                 for proc in get_chrome_processes():
@@ -1224,9 +1830,9 @@ async def main_loop():
                 hrs = total_seconds_until_next // 3600
                 mins = (total_seconds_until_next % 3600) // 60
                 secs = total_seconds_until_next % 60
-                print(f"{CLOCK} {BLUE}Next 30-second monitoring in: {hrs:02d}:{mins:02d}:{secs:02d}{RESET}")
+                print(f"{CLOCK} {BLUE}Next {CYCLE_SECONDS}-second monitoring in: {hrs:02d}:{mins:02d}:{secs:02d}{RESET}")
                 
-                print(f"\n{SUN} {GREEN}30-second monitoring cycle completed successfully!{RESET}")
+                print(f"\n{SUN} {GREEN}{CYCLE_SECONDS}-second monitoring cycle completed successfully!{RESET}")
                 print(f"{CHECK_MARK} {GREEN}Today's monitoring session #{monitoring_count} finished{RESET}")
                 print(f"{INFO} {BLUE}Total monitoring sessions today: {monitoring_count}{RESET}")
                 print(f"{MOON} {BLUE}Bot will sleep until next run (every {CYCLE_SECONDS} seconds){RESET}")
@@ -1237,7 +1843,7 @@ async def main_loop():
                 time_diff = next_run - now
                 total_seconds = int(time_diff.total_seconds())
                 th = total_seconds // 3600
-                tm = (total_seconds % 3600) // 60
+                tm = total_seconds % 3600 // 60
                 ts = total_seconds % 60
                 print(f"{CLOCK} {BLUE}Sleep duration: {th:02d}:{tm:02d}:{ts:02d}{RESET}")
                 print(f"{INFO} {BLUE}Next monitoring: In {CYCLE_SECONDS} seconds{RESET}")
@@ -1249,7 +1855,7 @@ async def main_loop():
                     print(f"{INFO} {BLUE}Status: Monitoring session #{monitoring_count} of the day completed{RESET}")
                 
                 print(f"{CYAN}{'─'*70}{RESET}")
-                print(f"{INFO} {BLUE}30-second monitoring cycle completed. Waiting for next cycle...{RESET}")
+                print(f"{INFO} {BLUE}{CYCLE_SECONDS}-second monitoring cycle completed. Waiting for next cycle...{RESET}")
                 
         except KeyboardInterrupt:
             print(f"\n{WARNING} {YELLOW}Bot stopped by user.{RESET}")
@@ -1261,6 +1867,26 @@ async def main_loop():
                 pass
             print(f"{CHECK_MARK} {GREEN}Browser closed. Safe to exit.{RESET}")
             print(f"{CHECK_MARK} {GREEN}Bot finished.{RESET}")
+
+def get_today_monitoring_count() -> int:
+    """Return the highest monitoring_count for today (WIB) or 0 if none.
+    Uses the single-doc-per-day model with an incrementing monitoring_count.
+    """
+    try:
+        today_start_utc, today_end_utc = get_today_wib_range_utc()
+        doc = stats_collection.find_one(
+            {
+                'cycle_type': f'{CYCLE_SECONDS}sec',
+                'timestamp': { '$gte': today_start_utc, '$lt': today_end_utc }
+            },
+            sort=[('monitoring_count', -1)]
+        )
+        if not doc:
+            return 0
+        count = int(doc.get('monitoring_count', 0) or 0)
+        return count if count >= 0 else 0
+    except Exception:
+        return 0
 
 if __name__ == "__main__":
     try:

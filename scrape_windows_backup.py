@@ -34,6 +34,7 @@
 # - Database integration for both followers and posts
 # - Real-time monitoring every 30 seconds
 # - UNLIMITED retry until valid data found
+# - All configuration values are now constants (no CLI/ENV needed)
 import asyncio
 from playwright.async_api import async_playwright
 import time
@@ -84,8 +85,45 @@ PLATFORM_ICONS = {
 # WIB Timezone
 WIB_TZ = pytz.timezone('Asia/Jakarta')
 
+# =============================================================================
+# CONFIGURATION CONSTANTS - MODIFY THESE VALUES AS NEEDED
+# =============================================================================
+# 
+# 🚀 QUICK CONFIGURATION GUIDE:
+# 
+# 1. CYCLE_SECONDS: How often to run monitoring (in seconds)
+#    - Default: 5 seconds (very fast for testing)
+#    - Recommended: 30 seconds for production
+#    - Maximum: 3600 seconds (1 hour)
+# 
+# 2. SHOW_BROWSER: Whether to show browser window
+#    - True: Show browser (good for debugging)
+#    - False: Headless mode (better for production)
+# 
+# 3. POST_OPEN_WAIT_MODE: How to wait after opening pages
+#    - 'auto': Wait until elements are ready (recommended)
+#    - 'fixed': Always wait fixed time
+# 
+# 4. POST_OPEN_WAIT_MS_*: Wait times in milliseconds
+#    - Instagram: 5000ms = 5 seconds
+#    - TikTok: 3000ms = 3 seconds
+# 
+# =============================================================================
+
 # Monitoring cycle interval (seconds)
-CYCLE_SECONDS = 30
+CYCLE_SECONDS = 5
+
+# Show browser window on Windows by default
+SHOW_BROWSER = True
+
+# Post-open wait behavior configuration
+POST_OPEN_WAIT_MODE = 'auto'  # 'auto' or 'fixed'
+POST_OPEN_WAIT_MS_IG = 5000   # 5000ms = 5 seconds for Instagram
+POST_OPEN_WAIT_MS_TIKTOK = 3000  # 3000ms = 3 seconds for TikTok
+
+# =============================================================================
+# END CONFIGURATION CONSTANTS
+# =============================================================================
 
 # Show browser window on Windows by default
 SHOW_BROWSER = True
@@ -151,14 +189,33 @@ def clean_and_convert_to_int(value_str):
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
+def get_today_wib_range_utc():
+    """Return today's start and end time in WIB converted to UTC (for Mongo queries)."""
+    now_wib = datetime.now(WIB_TZ)
+    start_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_wib = start_wib + timedelta(days=1)
+    return start_wib.astimezone(timezone.utc), end_wib.astimezone(timezone.utc)
+
+def format_duration_hms(total_seconds: float) -> str:
+    """Convert seconds to HH:MM:SS string."""
+    total = int(total_seconds if total_seconds is not None else 0)
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    seconds = total % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+def now_wib_compact_str() -> str:
+    """Return current WIB time formatted as 'DD-MM-YYYY | HH:MM:SS WIB'."""
+    return datetime.now(WIB_TZ).strftime('%d-%m-%Y | %H:%M:%S WIB')
+
 def get_next_run_time():
-    """Hitung waktu sampai siklus berikutnya (setiap 30 detik)."""
+    """Hitung waktu sampai siklus berikutnya (setiap CYCLE_SECONDS detik)."""
     now = datetime.now(WIB_TZ)
     target_time = now + timedelta(seconds=CYCLE_SECONDS)
     return target_time
 
 def get_time_until_next_run():
-    """Hitung berapa lama lagi sampai siklus berikutnya (30 detik)."""
+    """Hitung berapa lama lagi sampai siklus berikutnya (CYCLE_SECONDS detik)."""
     next_run = get_next_run_time()
     now = datetime.now(WIB_TZ)
     time_diff = next_run - now
@@ -185,13 +242,15 @@ def print_header():
     print(f"{BOLD}{CYAN}{'='*80}{RESET}")
     print(f"{BOLD}{MAGENTA}🤖 CREATOR WEB MONITORING BOT v2.0 🤖{RESET}")
     print(f"{BOLD}{CYAN}{'='*80}{RESET}")
-    print(f"{INFO} {BLUE}Instagram & TikTok Followers & Posts Monitor (Every 30 Seconds){RESET}")
+    print(f"{INFO} {BLUE}Instagram & TikTok Followers & Posts Monitor (Every {CYCLE_SECONDS} Seconds - Constant){RESET}")
     print(f"{CLOCK} {BLUE}Current Time (WIB): {now.strftime('%Y-%m-%d %H:%M:%S')}{RESET}")
     print(f"{SUN} {BLUE}Next Run: {next_run.strftime('%Y-%m-%d %H:%M:%S')} WIB{RESET}")
     print(f"{STAR} {BLUE}Time Until Next Run: {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}")
     print(f"{INFO} {BLUE}Today's Date: {now.strftime('%A, %d %B %Y')}{RESET}")
     print(f"{COMPUTER} {BLUE}System: {platform.system()} {platform.release()} | CPU: {cpu_percent:.0f}% | RAM: {ram_percent:.0f}%{RESET}")
-    print(f"{GLOBE} {BLUE}Cycle: every {CYCLE_SECONDS} seconds{RESET}")
+    print(f"{GLOBE} {BLUE}Cycle: every {CYCLE_SECONDS} seconds (constant){RESET}")
+    # Tampilkan konfigurasi post-open wait (konstanta)
+    print(f"{INFO} {BLUE}Post-open wait: mode={POST_OPEN_WAIT_MODE.upper()} | IG={POST_OPEN_WAIT_MS_IG}ms | TikTok={POST_OPEN_WAIT_MS_TIKTOK}ms (constants){RESET}")
     
     # Tampilkan informasi waktu yang tersisa dalam format yang mudah dibaca
     if hours >= 24:
@@ -201,9 +260,12 @@ def print_header():
     else:
         print(f"{CLOCK} {BLUE}Sleep Duration: {hours} hours, {minutes:02d} minutes{RESET}")
     
-    # Cek status monitoring hari ini
-    today = datetime.now(WIB_TZ).strftime('%Y-%m-%d')
-    today_stats = list(stats_collection.find({'date': today, 'cycle_type': '30sec'}))
+    # Cek status monitoring hari ini (berdasarkan rentang timestamp WIB)
+    today_start_utc, today_end_utc = get_today_wib_range_utc()
+    today_stats = list(stats_collection.find({
+        'cycle_type': f'{CYCLE_SECONDS}sec',
+        'timestamp': { '$gte': today_start_utc, '$lt': today_end_utc }
+    }))
     if len(today_stats) == 0:
         print(f"{INFO} {BLUE}Today's Status: No monitoring sessions yet{RESET}")
     else:
@@ -254,12 +316,12 @@ def print_cycle_summary(success, fail, total, cycle_time):
     print(f"{CROSS_MARK} {RED}Failed: {fail}{RESET}")
     print(f"{INFO} {BLUE}Total: {total}{RESET}")
     print(f"{STAR} {BLUE}Success Rate: {success_rate:.1f}%{RESET}")
-    print(f"{CLOCK} {BLUE}Cycle Time: {cycle_time:.2f}s{RESET}")
+    print(f"{CLOCK} {BLUE}Cycle Time: {format_duration_hms(cycle_time)}{RESET}")
     print(f"{INFO} {BLUE}Data Collected: Followers + Posts{RESET}")
     print(f"{BOLD}{MAGENTA}{'='*80}{RESET}")
 
 def print_countdown():
-    """Print countdown yang modern sampai siklus berikutnya (30 detik)"""
+    """Print countdown yang modern sampai siklus berikutnya (CYCLE_SECONDS detik)"""
     target_time = get_next_run_time()
     
     while True:
@@ -267,7 +329,7 @@ def print_countdown():
         time_diff = target_time - now
         
         if time_diff.total_seconds() <= 0:
-            print(f"\n{SUN} {GREEN}Time to wake up! Starting 30-second monitoring...{RESET}")
+            print(f"\n{SUN} {GREEN}Time to wake up! Starting {CYCLE_SECONDS}-second monitoring...{RESET}")
             break
         
         hours = int(time_diff.total_seconds() // 3600)
@@ -275,12 +337,12 @@ def print_countdown():
         seconds = int(time_diff.total_seconds() % 60)
         
         # Clear line dan print countdown dengan format yang lebih baik
-        print(f"\r{MOON} {BLUE}Waiting until next 30s cycle - {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}", end='', flush=True)
+        print(f"\r{MOON} {BLUE}Waiting until next {CYCLE_SECONDS}s cycle - {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}", end='', flush=True)
         
         time.sleep(1)
 
 async def print_countdown_async():
-    """Print countdown yang modern sampai siklus berikutnya (30 detik) (async version)"""
+    """Print countdown yang modern sampai siklus berikutnya (CYCLE_SECONDS detik) (async version)"""
     target_time = get_next_run_time()
     
     while True:
@@ -288,7 +350,7 @@ async def print_countdown_async():
         time_diff = target_time - now
         
         if time_diff.total_seconds() <= 0:
-            print(f"\n{SUN} {GREEN}Time to wake up! Starting 30-second monitoring...{RESET}")
+            print(f"\n{SUN} {GREEN}Time to wake up! Starting {CYCLE_SECONDS}-second monitoring...{RESET}")
             break
         
         hours = int(time_diff.total_seconds() // 3600)
@@ -296,7 +358,7 @@ async def print_countdown_async():
         seconds = int(time_diff.total_seconds() % 60)
         
         # Clear line dan print countdown dengan format yang lebih baik
-        print(f"\r{MOON} {BLUE}Waiting until next 30s cycle - {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}", end='', flush=True)
+        print(f"\r{MOON} {BLUE}Waiting until next {CYCLE_SECONDS}s cycle - {hours:02d}:{minutes:02d}:{seconds:02d}{RESET}", end='', flush=True)
         
         await asyncio.sleep(1)
 
@@ -446,8 +508,8 @@ async def simple_sample_posts(get_value_func, page, max_attempts=10):
     print(f"[SAMPLING] Posts: N/A (Max attempts {max_attempts} reached)")
     return "N/A"
 
-# Versi cepat untuk posts: satu pembacaan saja sudah cukup karena nilai statis
-async def stable_sample_posts(get_value_func, page, sample_count=1, interval=0.05, timeout=1):
+# Versi stabil untuk posts, sama seperti followers (100% konsisten dalam satu batch)
+async def stable_sample_posts(get_value_func, page, sample_count=3, interval=0.1, timeout=5):
     """
     Melakukan sampling nilai posts sebanyak sample_count kali (interval detik),
     dan hanya return jika SEMUA hasil 100% sama (tidak boleh ada perbedaan).
@@ -455,7 +517,7 @@ async def stable_sample_posts(get_value_func, page, sample_count=1, interval=0.0
     Jika timeout, return 'N/A'.
     """
     start = time.time()
-    print(f"[SAMPLING] Mulai sampling posts ({sample_count}x, interval={interval}s, timeout={timeout}s) - QUICK MODE{RESET}")
+    print(f"[SAMPLING] Mulai sampling posts ({sample_count}x, interval={interval}s, timeout={timeout}s) - HARUS 100% STABIL{RESET}")
     while time.time() - start < timeout:
         samples = []
         for i in range(sample_count):
@@ -464,7 +526,10 @@ async def stable_sample_posts(get_value_func, page, sample_count=1, interval=0.0
             print(f"[SAMPLING] Sample ke-{i+1}: {value}")
             if i < sample_count - 1:
                 await asyncio.sleep(interval)
-        # Ringkasan singkat (tanpa heavy console clears)
+        # Clear print sampling dari terminal setiap selesai batch
+        total_lines = sample_count + 2
+        for _ in range(total_lines):
+            print("\033[F\033[K", end='')
         if all(s == samples[0] and s not in (None, "N/A", "") for s in samples):
             print(f"[SAMPLING] ✅ SEMUA sample 100% STABIL: {samples[0]}")
             return samples[0]
@@ -488,7 +553,7 @@ async def stable_sample_posts(get_value_func, page, sample_count=1, interval=0.0
             else:
                 print(f"{RED}# ❌ TIDAK STABIL - Mayoritas: -{RESET}")
                 print(f"{RED}# ❌ Index berbeda: -{RESET}")
-            print(f"{YELLOW}# 🔄 Retrying cepat...{RESET}")
+            print(f"{YELLOW}# 🔄 Retrying untuk mendapatkan 100% stabil...{RESET}")
     print(f"[SAMPLING] ❌ Timeout - tidak bisa dapat 100% stabil dalam {timeout}s")
     return "N/A"
 
@@ -524,7 +589,7 @@ async def get_instagram_posts_value(page):
 
         # Ambil angka dari container berdasarkan label 'Posts' atau class .posts-odometer
         post_text = await page.evaluate(
-            r"""
+            """
             () => {
                 const getDigitsFrom = (container) => {
                     if (!container) return '';
@@ -581,63 +646,9 @@ async def get_instagram_posts_value(page):
     except Exception:
         return "N/A"
 
-async def get_tiktok_followers_value(page):
+# Quick path: attempt to read Instagram posts once without sampling or waits
+async def try_get_instagram_posts_quick(page):
     try:
-        await page.wait_for_selector(".odometer-inside", timeout=10000)
-        odometers = await page.query_selector_all(".odometer-inside")
-        if odometers:
-            value_spans = await odometers[0].query_selector_all(".odometer-value")
-            texts = [await page.evaluate('(el) => el.textContent', elem) for elem in value_spans]
-            follower_count = ''.join(texts)
-            return follower_count if follower_count else "N/A"
-        return "N/A"
-    except Exception:
-        return "N/A"
-
-async def get_tiktok_posts_value(page):
-    """Scrape TikTok post count using explicit XPath provided by user for reliability."""
-    try:
-        container_xpath = "//html/body/div/div/div[3]/div[4]/div[3]/div/div/div"
-
-        # Try the explicit container first
-        container = await page.wait_for_selector(f"xpath={container_xpath}", timeout=8000)
-        if container:
-            # Try for a short period to allow odometer to render
-            for _ in range(30):  # ~3s total
-                # Count direct span children under the container using XPath snapshot
-                span_count = await page.evaluate(
-                    """
-                    (baseXp) => {
-                        const snapshot = document.evaluate(baseXp + '/span', document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-                        return snapshot ? snapshot.snapshotLength : 0;
-                    }
-                    """,
-                    container_xpath,
-                )
-
-                if isinstance(span_count, (int, float)) and span_count > 0:
-                    parts = []
-                    for i in range(1, int(span_count) + 1):
-                        text = await page.evaluate(
-                            """
-                            (baseXp, idx) => {
-                                const xp = baseXp + '/span[' + idx + ']/span[2]/span/span/span';
-                                const node = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                                return node ? (node.textContent || '').trim() : '';
-                            }
-                            """,
-                            container_xpath,
-                            i,
-                        )
-                        parts.append(text or "")
-
-                    digits_only = re.sub(r"[^\d]", "", "".join(parts))
-                    if digits_only and digits_only.isdigit():
-                        return digits_only
-
-                await page.wait_for_timeout(100)
-
-        # Fallback: use generic DOM scan (quick)
         post_text = await page.evaluate(
             """
             () => {
@@ -657,19 +668,221 @@ async def get_tiktok_posts_value(page):
                     }
                     return '';
                 };
-                const known = document.querySelector('div[aria-label="Post Count"], div[aria-label="Posts Count"], .post-count');
-                if (known) return getDigitsFrom(known);
-                const odometers = Array.from(document.querySelectorAll('.odometer, .odometer-inside'));
-                for (const odo of odometers) {
-                    const got = getDigitsFrom(odo);
-                    if (got && /\d/.test(got)) return got;
+
+                // 1) By label 'Posts'
+                const label = Array.from(document.querySelectorAll('.stat-label'))
+                  .find(el => el.textContent && el.textContent.trim().toLowerCase() === 'posts');
+                if (label) {
+                    let prev = label.previousElementSibling;
+                    while (prev && !(prev.className || '').toString().includes('odometer')) {
+                        prev = prev.previousElementSibling;
+                    }
+                    const fromLabel = getDigitsFrom(prev);
+                    if (fromLabel) return fromLabel;
+                    const parentOdo = label.parentElement?.querySelector('.posts-odometer');
+                    const fromParent = getDigitsFrom(parentOdo);
+                    if (fromParent) return fromParent;
                 }
-                return '';
+
+                // 2) Direct class
+                const direct = document.querySelector('.posts-odometer');
+                const fromDirect = getDigitsFrom(direct);
+                if (fromDirect) return fromDirect;
+
+                // 3) Legacy
+                const legacy = document.querySelector('div[aria-label="Post Count"], div[aria-label="Posts Count"]');
+                return getDigitsFrom(legacy);
             }
             """
         )
+        post_count = re.sub(r'[^\d]', '', post_text or '')
+        if post_count and post_count.isdigit():
+            return post_count
+        return "N/A"
+    except Exception:
+        return "N/A"
 
-        post_count = re.sub(r"[^\d]", "", post_text or "")
+async def get_tiktok_followers_value(page):
+    try:
+        await page.wait_for_selector(".odometer-inside", timeout=10000)
+        odometers = await page.query_selector_all(".odometer-inside")
+        if odometers:
+            value_spans = await odometers[0].query_selector_all(".odometer-value")
+            texts = [await page.evaluate('(el) => el.textContent', elem) for elem in value_spans]
+            follower_count = ''.join(texts)
+            return follower_count if follower_count else "N/A"
+        return "N/A"
+    except Exception:
+        return "N/A"
+
+async def get_tiktok_posts_value(page):
+    """Scrape TikTok post count using the new XPath method"""
+    try:
+        # Wait for the post count container - try multiple selectors
+        selectors = [
+            "div[aria-label='Post Count']",
+            "div[aria-label='Posts Count']",
+            ".post-count",
+            "//html/body/div/div/div[3]/div[4]/div[3]/div/div/div"
+        ]
+        
+        post_container = None
+        for selector in selectors:
+            try:
+                if selector.startswith("//"):
+                    # XPath selector
+                    post_container = await page.wait_for_selector(f"xpath={selector}", timeout=5000)
+                else:
+                    # CSS selector
+                    post_container = await page.wait_for_selector(selector, timeout=5000)
+                if post_container:
+                    break
+            except Exception:
+                continue
+        
+        if not post_container:
+            return "N/A"
+        
+        # Count odometer-digit elements
+        digit_count = await page.evaluate("""
+            () => {
+                const container = document.querySelector('div[aria-label="Post Count"], div[aria-label="Posts Count"], .post-count') || 
+                                 document.evaluate('//html/body/div/div/div[3]/div[4]/div[3]/div/div/div', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                if (!container) return 0;
+                const digits = container.querySelectorAll('span.odometer-digit, .odometer-digit');
+                return digits.length;
+            }
+        """)
+        
+        if digit_count > 0:
+            # Build the post count by iterating through each digit
+            post_count = ""
+            for i in range(1, digit_count + 1):
+                try:
+                    value = await page.evaluate(f"""
+                        () => {{
+                            const container = document.querySelector('div[aria-label="Post Count"], div[aria-label="Posts Count"], .post-count') || 
+                                             document.evaluate('//html/body/div/div/div[3]/div[4]/div[3]/div/div/div', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                            if (!container) return '';
+                            const digit = container.querySelector('span:nth-child({i}) span.odometer-value, span:nth-child({i}) .odometer-value');
+                            return digit ? digit.textContent : '';
+                        }}
+                    """)
+                    post_count += value
+                except Exception:
+                    continue
+            
+            # Validate the post count
+            if post_count and post_count.strip() and post_count.isdigit():
+                return post_count
+        
+        # Fallback: try to get all odometer-value elements
+        value_elements = await page.query_selector_all("div[aria-label='Post Count'] span.odometer-value, div[aria-label='Posts Count'] span.odometer-value, .post-count span.odometer-value, div[aria-label='Post Count'] .odometer-value, div[aria-label='Posts Count'] .odometer-value, .post-count .odometer-value")
+        if value_elements:
+            texts = [await page.evaluate('(el) => el.textContent', elem) for elem in value_elements]
+            post_text = ''.join(texts)
+            post_count = re.sub(r'[^\d]', '', post_text)
+            if post_count and post_count.isdigit():
+                return post_count
+        
+        return "N/A"
+    except Exception as e:
+        return "N/A"
+
+async def smart_post_open_wait(page, platform: str):
+    """Tunggu secara cerdas setelah tab terbuka sesuai konfigurasi.
+    - fixed: tidur sesuai ms per platform
+    - auto: menunggu hingga elemen kunci siap, maksimal ms per platform
+    """
+    mode = POST_OPEN_WAIT_MODE
+    max_ms = POST_OPEN_WAIT_MS_TIKTOK if platform == 'tiktok' else POST_OPEN_WAIT_MS_IG
+    # Beri default yang masuk akal jika 0 pada mode auto
+    if mode == 'auto' and max_ms <= 0:
+        max_ms = 1000 if platform == 'tiktok' else 300
+
+    if mode not in ('auto', 'fixed'):
+        mode = 'auto'
+
+    if mode == 'fixed':
+        if max_ms > 0:
+            print(f"{MOON} {BLUE}Settling page (fixed) {platform} for {max_ms}ms...{RESET}")
+            await asyncio.sleep(max_ms / 1000)
+        else:
+            print(f"{SUN} {GREEN}No post-open wait required (fixed=0ms).{RESET}")
+        return
+
+    # mode == 'auto'
+    print(f"{MOON} {BLUE}Settling page (auto) {platform} up to {max_ms}ms...{RESET}")
+    start = time.time()
+    deadline = start + (max_ms / 1000 if max_ms > 0 else 0)
+    check_interval = 0.1
+
+    async def ig_ready() -> bool:
+        try:
+            el = await page.query_selector("div[aria-label='Follower Count']")
+            if not el:
+                return False
+            texts = await page.query_selector_all("div[aria-label='Follower Count'] span.odometer-value, div[aria-label='Follower Count'] span.odometer-formatting-mark")
+            if not texts:
+                return False
+            vals = [await page.evaluate('(n)=>n.textContent', t) for t in texts]
+            digits = re.sub(r'\D', '', ''.join(vals) if vals else '')
+            return bool(digits)
+        except Exception:
+            return False
+
+    async def tt_ready() -> bool:
+        try:
+            od = await page.query_selector(".odometer-inside")
+            if not od:
+                return False
+            values = await od.query_selector_all('.odometer-value')
+            if not values:
+                return False
+            vals = [await page.evaluate('(n)=>n.textContent', t) for t in values]
+            digits = re.sub(r'\D', '', ''.join(vals) if vals else '')
+            return bool(digits)
+        except Exception:
+            return False
+
+    is_ready = False
+    while True:
+        if platform == 'instagram':
+            is_ready = await ig_ready()
+        else:
+            is_ready = await tt_ready()
+
+        if is_ready:
+            print(f"{CHECK_MARK} {GREEN}Page ready. Proceeding...{RESET}")
+            break
+        if max_ms > 0 and time.time() >= deadline:
+            print(f"{WARNING} {YELLOW}Reached auto wait limit ({max_ms}ms). Continuing...{RESET}")
+            break
+        await asyncio.sleep(check_interval)
+
+# Quick path: attempt to read TikTok posts once without sampling or waits
+async def try_get_tiktok_posts_quick(page):
+    try:
+        post_text = await page.evaluate("""
+            () => {
+                const container = document.querySelector('div[aria-label="Post Count"], div[aria-label="Posts Count"], .post-count') || 
+                                 document.evaluate('//html/body/div/div/div[3]/div[4]/div[3]/div/div/div', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                if (!container) return '';
+                const values = container.querySelectorAll('.odometer-value, span.odometer-value');
+                if (values && values.length) {
+                    return Array.from(values).map(el => (el.textContent || '').trim()).join('');
+                }
+                const digits = container.querySelectorAll('span.odometer-digit, .odometer-digit');
+                if (digits && digits.length) {
+                    return Array.from(digits).map(d => {
+                        const v = d.querySelector('.odometer-value');
+                        return v ? v.textContent || '' : '';
+                    }).join('');
+                }
+                return '';
+            }
+        """)
+        post_count = re.sub(r'[^\d]', '', post_text or '')
         if post_count and post_count.isdigit():
             return post_count
         return "N/A"
@@ -753,12 +966,12 @@ async def main_loop():
     }
     
     print(f"{SUN} {BOLD}{GREEN}Bot started successfully!{RESET}")
-    print(f"{INFO} {BLUE}Bot will run automatically every {CYCLE_SECONDS} seconds{RESET}")
+    print(f"{INFO} {BLUE}Bot will run automatically every {CYCLE_SECONDS} seconds (constant){RESET}")
     
     async with async_playwright() as p:
         try:
             while True:
-                # Cek apakah sudah waktunya untuk monitoring (setiap 30 detik)
+                # Cek apakah sudah waktunya untuk monitoring (setiap CYCLE_SECONDS detik)
                 now = datetime.now(WIB_TZ)
                 next_run = get_next_run_time()
                 
@@ -766,7 +979,7 @@ async def main_loop():
                 if now < next_run:
                     clear_screen()
                     print_header()
-                    print(f"\n{MOON} {BOLD}{BLUE}Waiting until next 30-second cycle...{RESET}")
+                    print(f"\n{MOON} {BOLD}{BLUE}Waiting until next {CYCLE_SECONDS}-second cycle...{RESET}")
                     print(f"{INFO} {BLUE}Current time: {now.strftime('%H:%M:%S')} WIB{RESET}")
                     print(f"{SUN} {BLUE}Next monitoring at: {next_run.strftime('%H:%M:%S')} WIB{RESET}")
                     
@@ -777,13 +990,16 @@ async def main_loop():
                 clear_screen()
                 print_header()
                 now = datetime.now(WIB_TZ)
-                print(f"\n{ROCKET} {BOLD}{CYAN}Starting 30-second monitoring cycle...{RESET}")
-                print(f"{CLOCK} {BLUE}30-second cycle started at: {now.strftime('%H:%M:%S')} WIB{RESET}")
+                print(f"\n{ROCKET} {BOLD}{CYAN}Starting {CYCLE_SECONDS}-second monitoring cycle...{RESET}")
+                print(f"{CLOCK} {BLUE}{CYCLE_SECONDS}-second cycle started at: {now.strftime('%H:%M:%S')} WIB{RESET}")
                 print(f"{INFO} {BLUE}Monitoring Date: {now.strftime('%A, %d %B %Y')}{RESET}")
                 
-                # Cek apakah ini monitoring pertama hari ini
-                today = datetime.now(WIB_TZ).strftime('%Y-%m-%d')
-                today_stats = list(stats_collection.find({'date': today, 'cycle_type': '30sec'}))
+                # Cek apakah ini monitoring pertama hari ini (berdasarkan rentang timestamp WIB)
+                today_start_utc, today_end_utc = get_today_wib_range_utc()
+                today_stats = list(stats_collection.find({
+                    'cycle_type': f'{CYCLE_SECONDS}sec',
+                    'timestamp': { '$gte': today_start_utc, '$lt': today_end_utc }
+                }))
                 if len(today_stats) == 0:
                     print(f"{STAR} {BLUE}First monitoring session of the day{RESET}")
                 else:
@@ -882,8 +1098,9 @@ async def main_loop():
                                 
                                 print(f"{CHECK_MARK} {GREEN}Browser tab opened successfully{RESET}")
                                 if user_info['platform'] == 'tiktok':
-                                    await asyncio.sleep(1)  # Reduced from 2s
                                     await handle_tiktok_cookie_popup(page)
+                                # Cerdas: tunggu setelah tab terbuka sesuai konfigurasi
+                                await smart_post_open_wait(page, user_info['platform'])
                                 
                                 # Loop until we get valid data (unlimited)
                                 while True:
@@ -900,8 +1117,11 @@ async def main_loop():
                                             post_count_str = "N/A"
                                             post_count_int = None
                                             try:
-                                                # Gunakan sampling stabil seperti followers
-                                                post_count_str = await stable_sample_posts(get_instagram_posts_value, page)
+                                                # Fast path: attempt quick grab without sampling
+                                                post_count_str = await try_get_instagram_posts_quick(page)
+                                                if not post_count_str or post_count_str == "N/A":
+                                                    # Fallback to stable sampling if quick path fails
+                                                    post_count_str = await stable_sample_posts(get_instagram_posts_value, page)
                                                 post_count_int = clean_and_convert_to_int(post_count_str)
                                                 print(f"{CHECK_MARK} {GREEN}Posts scraped: {post_count_str}{RESET}")
                                             except Exception as e:
@@ -954,8 +1174,11 @@ async def main_loop():
                                             posts = "N/A"
                                             posts_int = None
                                             try:
-                                                # Gunakan sampling stabil seperti followers
-                                                posts = await stable_sample_posts(get_tiktok_posts_value, page)
+                                                # Fast path: attempt quick grab without sampling
+                                                posts = await try_get_tiktok_posts_quick(page)
+                                                if not posts or posts == "N/A":
+                                                    # Fallback to stable sampling if quick path fails
+                                                    posts = await stable_sample_posts(get_tiktok_posts_value, page)
                                                 posts_int = clean_and_convert_to_int(posts)
                                                 print(f"{CHECK_MARK} {GREEN}Posts scraped: {posts}{RESET}")
                                             except Exception as e:
@@ -1083,20 +1306,24 @@ async def main_loop():
                 siklus_time = time.time() - siklus_start
                 print_cycle_summary(total_success, total_fail, len(users_to_monitor), siklus_time)
                 
-                # Hitung berapa kali monitoring sudah dilakukan hari ini (30 detik)
-                today = datetime.now(WIB_TZ).strftime('%Y-%m-%d')
-                today_stats = list(stats_collection.find({'date': today, 'cycle_type': '30sec'}))
+                # Hitung berapa kali monitoring sudah dilakukan hari ini (CYCLE_SECONDS detik) berbasis timestamp WIB
+                today_start_utc, today_end_utc = get_today_wib_range_utc()
+                today_stats = list(stats_collection.find({
+                    'cycle_type': f'{CYCLE_SECONDS}sec',
+                    'timestamp': { '$gte': today_start_utc, '$lt': today_end_utc }
+                }))
                 monitoring_count = len(today_stats) + 1
                 
                 stats_collection.insert_one({
                     'timestamp': datetime.now(timezone.utc),
-                    'date': datetime.now(WIB_TZ).strftime('%Y-%m-%d'),
-                    'cycle_type': '30sec',
+                    'wib_datetime': now_wib_compact_str(),
+                    'cycle_type': f'{CYCLE_SECONDS}sec',
                     'monitoring_count': monitoring_count,
+                    'scrape_duration': format_duration_hms(siklus_time),
                     'data': stats_data
                 })
-                print(f"{CHECK_MARK} {GREEN}Statistics sent to MongoDB (30-second monitoring #{monitoring_count}){RESET}")
-                print(f"{INFO} {BLUE}Total 30-second monitoring sessions today: {monitoring_count}{RESET}")
+                print(f"{CHECK_MARK} {GREEN}Statistics sent to MongoDB ({CYCLE_SECONDS}-second monitoring #{monitoring_count}){RESET}")
+                print(f"{INFO} {BLUE}Total {CYCLE_SECONDS}-second monitoring sessions today: {monitoring_count}{RESET}")
                 print(f"{CYAN}{'─'*70}{RESET}")
                 print(f"{COMPUTER} {BLUE}Active Chrome processes:{RESET}")
                 for proc in get_chrome_processes():
@@ -1109,9 +1336,9 @@ async def main_loop():
                 hrs = total_seconds_until_next // 3600
                 mins = (total_seconds_until_next % 3600) // 60
                 secs = total_seconds_until_next % 60
-                print(f"{CLOCK} {BLUE}Next 30-second monitoring in: {hrs:02d}:{mins:02d}:{secs:02d}{RESET}")
+                print(f"{CLOCK} {BLUE}Next {CYCLE_SECONDS}-second monitoring in: {hrs:02d}:{mins:02d}:{secs:02d}{RESET}")
                 
-                print(f"\n{SUN} {GREEN}30-second monitoring cycle completed successfully!{RESET}")
+                print(f"\n{SUN} {GREEN}{CYCLE_SECONDS}-second monitoring cycle completed successfully!{RESET}")
                 print(f"{CHECK_MARK} {GREEN}Today's monitoring session #{monitoring_count} finished{RESET}")
                 print(f"{INFO} {BLUE}Total monitoring sessions today: {monitoring_count}{RESET}")
                 print(f"{MOON} {BLUE}Bot will sleep until next run (every {CYCLE_SECONDS} seconds){RESET}")
@@ -1134,7 +1361,7 @@ async def main_loop():
                     print(f"{INFO} {BLUE}Status: Monitoring session #{monitoring_count} of the day completed{RESET}")
                 
                 print(f"{CYAN}{'─'*70}{RESET}")
-                print(f"{INFO} {BLUE}30-second monitoring cycle completed. Waiting for next cycle...{RESET}")
+                print(f"{INFO} {BLUE}{CYCLE_SECONDS}-second monitoring cycle completed. Waiting for next cycle...{RESET}")
                 
         except KeyboardInterrupt:
             print(f"\n{WARNING} {YELLOW}Bot stopped by user.{RESET}")
